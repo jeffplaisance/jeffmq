@@ -1,0 +1,79 @@
+JeffMQ is a peer to peer message queue framework. It is built on top of ZeroMQ
+and uses a queue binding system similar to AMQP. There are no special nodes
+or single points of failure. Queues can only be accessed from the node they are
+created on. There is no replication, if the node dies the messages are gone.
+
+Building:
+1) Build ZeroMQ
+2) Build the java library for ZeroMQ. Source: http://github.com/zeromq/jzmq
+3) run sbt package
+
+JeffMQ is the main interface. It's really simple. There are 3 functions:
+1) bindQueue - bind a queue to a routing key
+2) unbindQueue - unbind a queue from a routing key
+3) send - send a message to a routing key
+
+I built JeffMQ with these goals in mind:
+
+1) IP addresses and domain names should be abstracted away
+2) Messages should only be lost if the sender fails or the receiver fails
+3) There should be no special nodes
+4) Messages can be sent one to one, one to many, many to one, and many to many.
+   This is handled through routing keys
+
+JeffMQ accomplishes these goals by maintaining a global routing table with
+JGroups. Each queue must be bound to at least one routing key in order to
+receive messages. Routes are maintained locally from routing keys to queues and
+globally from routing keys to physical machines. The global routing table uses
+JGroups to track cluster membership and to replicate routes to all servers.
+
+Routing keys are like topic exchanges from AMQP. They use '.' as a word
+delimiter, '*' for a wildcard to match a single word, and '#' for a wildcard
+to match one or more words. There is a good explanation at:
+
+http://www.redhat.com/docs/en-US/Red_Hat_Enterprise_MRG/1.0/html/Messaging_Tutorial/sect-Messaging_Tutorial-Initial_Concepts-Topic_Exchange.html
+
+Goal 1 is fulfilled by routing keys. You can name your nodes however you like
+and use queues bound to those names for messaging. This is particularly useful
+for logical nodes that can exist on one of many machines. You don't need to
+know the IP address of the physical machine the node is on, you just need to
+know its logical name.
+
+Goal 2 is met by forcing all queues to be local. The only way a message can be
+lost is if the sender fails or the reciever fails. No one else is involved.
+I should note that message delivery isn't reliable. The only way to be sure
+that a message was received is to receive an acknowledgement for it. If the
+network is partitioned messages will be dropped.
+
+Goal 3 is met by using JGroups to manage the cluster and by storing everything
+in a non conflicting manner. It is impossible for routing key bindings to
+conflict. Every node has the full routing table. Bindings are only deleted if
+the node is disconnected from the cluster or if the node that created the
+binding deletes it. In cases of network partitions, when the nodes merge back
+together the routing table from the largest sub view is used and all other
+nodes must re-add all of their bindings.
+
+Goal 4 is met by allowing multiple queues to be bound to the same routing key.
+One to one is obvious. Many to one is the same as one to one because anyone can
+send a message to a routing key at any time. One to many is handled by having
+many queues bound to the same routing key. Many to many is the same as one to
+many for the same reason many to one is the same as one to one.
+
+Notes on reliability, duplication, ordering, and failure:
+There is no reliability. If you don't get an ack for a message it may or may
+not have been received. For this reason you must handle duplication also, since
+the only way to get reliability is to send the message over and over until it
+is acknowledged. The reason why I did not implement acks in the protocol is
+because acks inevitably must be handled at the application level. If you
+implement timeouts of any kind over tcp there is a possibility of message
+duplication, which you then must handle in the application. At that point you
+are also essentially dealing with acks, so you might as well just not bother
+trying to bake them into the protocol. Messages do have a very high probability
+of arriving intact.
+
+There is no guarantee on message ordering. This doesn't really matter in the
+one to one and many to one scenarios. In the one to many and many to many
+scenarios there is no guarantee that all nodes will get the messages in the
+same order. That is not the point of this protocol.
+
+Failure can happen at any time and it will not affect nodes that are still up.
