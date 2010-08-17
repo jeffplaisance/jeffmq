@@ -35,11 +35,7 @@ class TopicTrie[V] extends MultiMap[String, V] {
     }
 
     def iterator: Iterator[(String, Set[V])] = {
-        toList.iterator
-    }
-
-    override def toList: List[(String,HashSet[V])] = {
-        TopicTrieNode.toList(Queue.empty[String], root)
+        TopicTrieNode.iterator(Queue.empty[String], root)
     }
 
     def -=(key: String) = {
@@ -109,9 +105,9 @@ object TopicTrieNode {
         }
     }
 
-    def toList[V](queue:Queue[String], node:TopicTrieNode[V]):List[(String, HashSet[V])] = {
+    def iterator[V](queue:Queue[String], node:TopicTrieNode[V]):Iterator[(String, HashSet[V])] = {
         val TopicTrieNode(nodes, values) = node
-        val results = nodes.map(x => toList(queue.enqueue(x._1), x._2)).toList.flatten
-        if (queue.isEmpty) results else ((queue.mkString("."), values))::results
+        val results = nodes.map(x => iterator(queue.enqueue(x._1), x._2)).iterator.flatten
+        if (queue.isEmpty) results else results++Iterator.single((queue.mkString("."), values))
     }
 }
