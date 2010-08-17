@@ -8,4 +8,4 @@ do
   CLASSPATH=${CLASSPATH}:${i}
 done
 
-java -Xmx512M -Djava.library.path=/usr/local/lib -Djava.net.preferIPv4Stack=true -cp ${CLASSPATH} jeffmq.JeffMQConsole $@
+java -Xmx512M -Djava.library.path=/usr/local/lib -Djava.net.preferIPv4Stack=true -cp ${CLASSPATH} com.jeffplaisance.jeffmq.JeffMQConsole $@
