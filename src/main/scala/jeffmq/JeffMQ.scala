@@ -21,8 +21,8 @@ import com.google.common.io.{CharStreams, ByteStreams}
 import java.nio.ByteBuffer
 import collection.mutable.{HashSet, HashMap}
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.BlockingQueue
 import java.net.InetAddress
+import java.util.concurrent.{ConcurrentHashMap, BlockingQueue}
 
 /**
  * @author jplaisance
@@ -60,11 +60,13 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
 
     private val recvSocket = zmqContext.socket(UPSTREAM)
 
-    private val sockets = new HashMap[String, Socket] //addresses to sockets
+    private val sockets = JavaConversions.asConcurrentMap(new ConcurrentHashMap[String, Socket]) //addresses to sockets
 
     private val bindings = new TopicTrie[BlockingQueue[JeffMQMessage]] //routing keys to queues, local
+    private val bindingsLock = new ReadWriteLock(true)
 
     private val routingTable = new TopicTrie[AddressPair] //routing keys to addresses, global
+    private val routingTableLock = new ReadWriteLock(true)
 
     private val viewCount = new AtomicLong
 
@@ -85,25 +87,26 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
             recvSocket.bind(protocol+"://"+localAddress)
             while (true) {
                 val JeffMQMessage(routingKey, buffer) = JeffMQMessage.parse(recvSocket.recv(0))
-                bindings.synchronized {
-                    bindings.lookup(routingKey).foreach(x => x.put(JeffMQMessage(routingKey, buffer.slice)))
-                }
+                val b = bindingsLock.readLock(bindings.lookup(routingKey))
+                b.foreach(x => x.put(JeffMQMessage(routingKey, buffer.slice)))
             }
         }
     }).start
 
     def bindQueue(routingKey:String, queue:BlockingQueue[JeffMQMessage]) = {
-        bindings.synchronized {
-            bindings.addBinding(routingKey, queue)
-        }
+        bindingsLock.writeLock(bindings.addBinding(routingKey, queue))
         setupRoute(routingKey)
     }
 
     def unbindQueue(routingKey:String, queue:BlockingQueue[JeffMQMessage]) = {
-        bindings.synchronized {
-            bindings.removeBinding(routingKey, queue)
-            if (bindings.get(routingKey).isEmpty) removeRoute(routingKey)
-        }
+        bindingsLock.writeLock.lock
+        bindings.removeBinding(routingKey, queue)
+        // I sincerely apologize for this locking construct from hell, but removeRoute
+        // sends a reliable message over the network so it can take an arbitrarily long time
+        if (bindings.get(routingKey).isEmpty) {
+            bindingsLock.writeLock.unlock
+            removeRoute(routingKey)
+        } else bindingsLock.writeLock.unlock
     }
 
     def send(routingKey:String, message:ChannelBuffer):Unit = send(routingKey, new ChannelBufferInputStream(message))
@@ -116,11 +119,12 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
         writeUtf8ToBuffer(buffer, routingKey)
         ByteStreams.copy(message, out)
         val bytes = ByteStreams.toByteArray(new ChannelBufferInputStream(buffer))
-        routingTable.synchronized {routingTable.lookup(routingKey).foreach(x => sockets.getOrElseUpdate(x.ip, {
+        val r = routingTableLock.readLock(routingTable.lookup(routingKey))
+        r.foreach(x => sockets.getOrElseUpdate(x.ip, {
             val socket = zmqContext.socket(DOWNSTREAM)
             socket.connect(protocol+"://"+x.ip)
             socket
-        }).send(bytes, NOBLOCK))}
+        }).send(bytes, NOBLOCK))
     }
 
     private def setupRoute(routingKey: String): Unit = {
@@ -150,7 +154,7 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
                     newView.getMembers.iterator.foreach(x => {
                         members+=x.toString
                     })
-                    routingTable.synchronized {
+                    routingTableLock.writeLock({
                         if (viewNum == viewCount.get) {
                             val remove = new HashMap[String, AddressPair]
                             routingTable.foreach(set => set._2.foreach(entry => if (!members.contains(entry.jg)) remove.put(set._1, entry)))
@@ -159,7 +163,7 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
                                 routingTable.removeBinding(entry._1, entry._2)
                             })
                         }
-                    }
+                    })
                 }
             }
             newView match {
@@ -169,11 +173,8 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
                             val (_, primary) = mergeView.getSubgroups.iterator.foldLeft[(Int, Option[View])]((0, None))((b, a) => if (a.size() > b._1) (a.size(), Some(a)) else b)
                             if (!primary.exists(x => x.containsMember(jGroupsAddress))) {
                                 jChannel.getState(null, 0)
-                                bindings.synchronized {
-                                    bindings.keySet.iterator.foreach(routingKey => {
-                                        setupRoute(routingKey)
-                                    })
-                                }
+                                val b = bindingsLock.readLock(bindings.keySet.toList)
+                                b.foreach(routingKey => setupRoute(routingKey))
                             }
                             deleteOldRoutes.run
                         }
@@ -187,27 +188,25 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
             val mod = buffer.readByte&0xFF
             val (ipPort,buffer2) = readUtf8FromBuffer(buffer)
             val (jGroupsAddr, _) = readUtf8FromBuffer(buffer2)
-            routingTable.synchronized {
+            routingTableLock.writeLock({
                 mod match {
                     case ADD => routingTable.addBinding(routingKey, AddressPair(ipPort, jGroupsAddr))
                     case REMOVE => routingTable.removeBinding(routingKey, AddressPair(ipPort, jGroupsAddr))
                 }
-            }
+            })
         }
 
         override def setState(state: Array[Byte]) = {
             val in = new ObjectInputStream(new ByteArrayInputStream(state))
             val newRoutingTable = in.readObject.asInstanceOf[TopicTrie[AddressPair]]
             in.close
-            routingTable.synchronized {
-                routingTable++=(newRoutingTable)
-            }
+            routingTableLock.writeLock(routingTable++=(newRoutingTable))
         }
 
         override def getState:Array[Byte] = {
             val byteStream = new ByteArrayOutputStream
             val out = new ObjectOutputStream(byteStream)
-            routingTable.synchronized {out.writeObject(routingTable)}
+            routingTableLock.readLock(out.writeObject(routingTable))
             out.close
             byteStream.toByteArray
         }
