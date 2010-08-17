@@ -20,9 +20,10 @@ import org.jboss.netty.buffer.{ChannelBufferInputStream, ChannelBufferOutputStre
 import com.google.common.io.{CharStreams, ByteStreams}
 import java.nio.ByteBuffer
 import collection.mutable.{HashSet, HashMap}
-import java.util.concurrent.atomic.AtomicLong
 import java.net.InetAddress
-import java.util.concurrent.{ConcurrentHashMap, BlockingQueue}
+import java.util.concurrent.{LinkedBlockingQueue, ConcurrentHashMap, BlockingQueue}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+import org.zeromq.ZMQ
 
 /**
  * @author jplaisance
@@ -48,17 +49,14 @@ object JeffMQ {
     }
 }
 
-class JeffMQ(private val zmqContext:Context, private val protocol:String, private val port:Int, jGroupsConfigPath:Option[String]) {
-
-    def this(_zmqContext:Context, _protocol:String, _port:Int, _jGroupsConfigPath:String) = this(_zmqContext, _protocol, _port, Some(_jGroupsConfigPath))
-    def this(_zmqContext:Context, _protocol:String, _port:Int) = this(_zmqContext, _protocol, _port, None)
-    def this(_zmqContext:Context, _port:Int, _jGroupsConfigPath:String) = this(_zmqContext, "tcp", _port, Some(_jGroupsConfigPath))
-    def this(_zmqContext:Context, _port:Int) = this(_zmqContext, "tcp", _port, None)
+class JeffMQ(private val port:Int, private val protocol:String = "tcp", jGroupsConfigPath:Option[String] = None) {
 
     import JavaConversions.asIterator
     import JeffMQ._
 
-    private val recvSocket = zmqContext.socket(UPSTREAM)
+    private val zmqContext = ZMQ.context(2)
+
+    private val sendQueue = new LinkedBlockingQueue[(String, Array[Byte])]
 
     private val sockets = JavaConversions.asConcurrentMap(new ConcurrentHashMap[String, Socket]) //addresses to sockets
 
@@ -82,16 +80,34 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
     private val jGroupsAddress = jChannel.getAddress
     private val jGroupsId = jGroupsAddress.toString
 
+    val recvRun = new AtomicBoolean(true)
     new Thread(new Runnable() {
         def run = {
+            val recvSocket = zmqContext.socket(UPSTREAM)
             recvSocket.bind(protocol+"://"+localAddress)
-            while (true) {
+            while (recvRun.get) {
                 val JeffMQMessage(routingKey, buffer) = JeffMQMessage.parse(recvSocket.recv(0))
                 val b = bindingsLock.readLock(bindings.lookup(routingKey))
                 b.foreach(x => x.put(JeffMQMessage(routingKey, buffer.slice)))
             }
         }
     }).start
+
+    val sendRun = new AtomicBoolean(true)
+    new Thread(new Runnable() {
+        def run: Unit = {
+            while (sendRun.get) {
+                val (ip, message) = sendQueue.take
+                sockets.getOrElseUpdate(ip, {
+                    val socket = zmqContext.socket(DOWNSTREAM)
+                    socket.connect(protocol+"://"+ip)
+                    socket
+                }).send(message, NOBLOCK)
+            }
+        }
+    }).start
+
+    override def finalize = {sendRun.set(false); recvRun.set(false)}
 
     def bindQueue(routingKey:String, queue:BlockingQueue[JeffMQMessage]) = {
         bindingsLock.writeLock(bindings.addBinding(routingKey, queue))
@@ -120,11 +136,7 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
         ByteStreams.copy(message, out)
         val bytes = ByteStreams.toByteArray(new ChannelBufferInputStream(buffer))
         val r = routingTableLock.readLock(routingTable.lookup(routingKey))
-        r.foreach(x => sockets.getOrElseUpdate(x.ip, {
-            val socket = zmqContext.socket(DOWNSTREAM)
-            socket.connect(protocol+"://"+x.ip)
-            socket
-        }).send(bytes, NOBLOCK))
+        r.foreach(x => sendQueue.put((x.ip, bytes)))
     }
 
     private def setupRoute(routingKey: String): Unit = {
@@ -159,8 +171,8 @@ class JeffMQ(private val zmqContext:Context, private val protocol:String, privat
                             val remove = new HashMap[String, AddressPair]
                             routingTable.foreach(set => set._2.foreach(entry => if (!members.contains(entry.jg)) remove.put(set._1, entry)))
                             remove.foreach(entry => {
-                                println("removing binding from "+entry._1+" to "+entry._2)
                                 routingTable.removeBinding(entry._1, entry._2)
+                                sockets.remove(entry._2.ip)
                             })
                         }
                     })

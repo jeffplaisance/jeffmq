@@ -13,7 +13,6 @@ package jeffmq
 
 import java.util.concurrent.LinkedBlockingQueue
 import org.jboss.netty.buffer.ChannelBuffers
-import org.zeromq.ZMQ
 
 /**
  * @author jplaisance
@@ -23,7 +22,7 @@ object JeffMQConsole {
     
     def main(args: Array[String]) {
         val port = args(0).toInt
-        val jeffMQ = new JeffMQ(ZMQ.context(1), port)
+        val jeffMQ = new JeffMQ(port)
         new Thread(new Runnable() {
             def run = {
                 val queue = new LinkedBlockingQueue[JeffMQMessage]
