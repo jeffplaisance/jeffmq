@@ -80,7 +80,7 @@ class JeffMQ(private val port:Int, private val protocol:String = "tcp", jGroupsC
     private val jGroupsAddress = jChannel.getAddress
     private val jGroupsId = jGroupsAddress.toString
 
-    val recvRun = new AtomicBoolean(true)
+    private val recvRun = new AtomicBoolean(true)
     new Thread(new Runnable() {
         def run = {
             val recvSocket = zmqContext.socket(UPSTREAM)
@@ -93,7 +93,7 @@ class JeffMQ(private val port:Int, private val protocol:String = "tcp", jGroupsC
         }
     }).start
 
-    val sendRun = new AtomicBoolean(true)
+    private val sendRun = new AtomicBoolean(true)
     new Thread(new Runnable() {
         def run: Unit = {
             while (sendRun.get) {
