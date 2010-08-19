@@ -1,7 +1,7 @@
 JeffMQ is a peer to peer message queue framework. It is built on top of ZeroMQ
-and uses a queue binding system similar to AMQP. There are no special nodes
-or single points of failure. Queues can only be accessed from the node they are
-created on. There is no replication, if the node dies the messages are gone.
+and implements a subset of AMQP. All exchanges are topic exchanges and all
+queues are exclusive and non-durable. This is to ensure that there are no
+special nodes or single points of failure.
 
 Building:
 1) Build ZeroMQ

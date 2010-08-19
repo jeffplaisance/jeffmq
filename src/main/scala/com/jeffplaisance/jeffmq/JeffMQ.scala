@@ -49,7 +49,7 @@ object JeffMQ {
     }
 }
 
-class JeffMQ(private val port:Int, private val protocol:String = "tcp", jGroupsConfigPath:Option[String] = None) {
+class JeffMQExchange(val name:String, val port:Int, val protocol:String = "tcp", jGroupsConfigPath:Option[String] = None) {
 
     import JavaConversions.asIterator
     import JeffMQ._
@@ -75,7 +75,7 @@ class JeffMQ(private val port:Int, private val protocol:String = "tcp", jGroupsC
 
     private val jChannel = jGroupsConfigPath.map(x => new JChannel(x)).getOrElse(new JChannel)
     jChannel.setReceiver(new JeffMQReceiverAdapter)
-    jChannel.connect("cluster")
+    jChannel.connect(name)
     jChannel.getState(null, 0)
     private val jGroupsAddress = jChannel.getAddress
     private val jGroupsId = jGroupsAddress.toString

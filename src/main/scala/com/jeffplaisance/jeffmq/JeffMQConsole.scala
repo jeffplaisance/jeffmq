@@ -22,7 +22,7 @@ object JeffMQConsole {
     
     def main(args: Array[String]) {
         val port = args(0).toInt
-        val jeffMQ = new JeffMQ(port)
+        val jeffMQ = new JeffMQExchange("cluster", port)
         new Thread(new Runnable() {
             def run = {
                 val queue = new LinkedBlockingQueue[JeffMQMessage]
